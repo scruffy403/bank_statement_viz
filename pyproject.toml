@@ -1,0 +1,21 @@
+[project]
+name = "bank_statement_viz"
+version = "0.1.0"
+description = "Personal finance dashboard with ML categorisation + YNAB integration"
+requires-python = ">=3.10"
+
+dependencies = [
+    "streamlit",
+    "pandas",
+    "plotly",
+    "requests",
+    "scikit-learn",
+    "reportlab",
+    "python-dateutil",
+    "chardet",
+    "matplotlib",
+    "numpy"
+]
+
+[tool.streamlit]
+theme.primaryColor="#4B9CD3"

@@ -1,0 +1,33 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+.streamlit/
+
+# Logs
+*.log
+
+# Data files (OPTIONAL — but recommended to prevent leaking bank data)
+data/*.csv
+data/
+uploaded_bank_data.csv
+
+# Reports
+*.pdf
+
+# OS / editor files
+.DS_Store
+.idea/
+.vscode/
