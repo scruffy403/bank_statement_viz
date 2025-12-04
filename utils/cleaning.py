@@ -1,10 +1,30 @@
 # utils/cleaning.py
 from __future__ import annotations
 
-import re
 from typing import Tuple
+import re
 
 import pandas as pd
+
+
+def normalize_merchant(name: str) -> str:
+    """
+    Normalise merchant / payee names so that:
+    - Case is removed
+    - Country suffixes like ' GB' / ' UK' are removed
+    - Digits and punctuation are stripped
+    - Multiple spaces are collapsed
+    This is used for BOTH bank CSV merchants and YNAB payees so that
+    fuzzy matching has a consistent representation to work from.
+    """
+    if not name:
+        return ""
+    name = name.lower()
+    name = name.replace(" uk", "").replace(" gb", "")
+    name = re.sub(r"\d+", "", name)              # remove numbers
+    name = re.sub(r"[^a-z\s]", " ", name)        # punctuation → space
+    name = re.sub(r"\s+", " ", name).strip()     # collapse spaces
+    return name
 
 
 def _parse_money(series: pd.Series) -> pd.Series:
@@ -48,14 +68,8 @@ def clean_bank_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     desc = df["Description"].fillna("").astype(str)
 
-    merchant_clean = desc.str.lower()
-    merchant_clean = merchant_clean.str.replace(" gb", "", regex=False)
-    merchant_clean = merchant_clean.str.replace(" uk", "", regex=False)
-    merchant_clean = merchant_clean.apply(lambda x: re.sub(r"\d+", "", x))
-    merchant_clean = merchant_clean.apply(lambda x: re.sub(r"[^a-z\s]", " ", x))
-    merchant_clean = merchant_clean.str.replace(r"\s+", " ", regex=True).str.strip()
-
-    df["MerchantClean"] = merchant_clean
+    # Use the shared normaliser so this matches YNAB payee cleaning
+    df["MerchantClean"] = desc.apply(normalize_merchant)
     df.loc[df["MerchantClean"] == "", "MerchantClean"] = "unknown"
 
     # Net = paid in - paid out

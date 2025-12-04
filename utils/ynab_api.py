@@ -10,6 +10,9 @@ import pandas as pd
 
 from .category_mapping import map_ynab_category_to_dashboard
 
+from rapidfuzz import process, fuzz
+from .cleaning import normalize_merchant
+
 
 YNAB_BASE_URL = "https://api.youneedabudget.com/v1"
 
@@ -108,48 +111,80 @@ def fetch_current_month_category_budgets(token: str, budget_id: str) -> pd.DataF
     return pd.DataFrame(rows)
 
 
-def build_payee_category_overrides(token: str, budget_id: str, days_back: int = 90) -> Dict[str, str]:
+def build_payee_category_overrides(
+    token: str,
+    budget_id: str,
+    days_back: int = 90,
+    threshold: int = 80,
+):
+    """
+    Create a mapping:
+        normalized_merchant → dashboard_category
+    using fuzzy matching between bank merchant names and YNAB payee names.
+
+    threshold: fuzzy match % required to accept a match (0–100)
+    """
     client = YNABClient(token=token)
 
-    since_date = (date.today() - timedelta(days=days_back)).isoformat()
+    # Get YNAB transactions
+    since_date = (date.today() - timedelta(days_back)).isoformat()
+    ynab_transactions = client.get_transactions_since(budget_id, since_date)
 
-    txs = client.get_transactions_since(budget_id, since_date)
-    if not txs:
-        return {}
-
-    groups = client.get_categories(budget_id)
+    # Get YNAB category ID → name map
+    cat_groups = client.get_categories(budget_id)
     cat_id_to_name = {}
-    for g in groups:
-        for c in g["categories"]:
-            cat_id_to_name[c["id"]] = c["name"]
+    for g in cat_groups:
+        for cat in g["categories"]:
+            cat_id_to_name[cat["id"]] = cat["name"]
 
-    import re
-    payee_map: Dict[str, list[str]] = {}
+    # Build normalized payee list + categories
+    ynab_payees = []
+    payee_to_category = {}
 
-    for tx in txs:
+    for tx in ynab_transactions:
         payee = tx.get("payee_name") or ""
         cat_id = tx.get("category_id")
+
         if not payee or not cat_id:
             continue
 
-        ynab_cat = cat_id_to_name.get(cat_id, "")
-        dash_cat = map_ynab_category_to_dashboard(ynab_cat)
-
-        clean = payee.lower()
-        clean = re.sub(r"\d+", "", clean)
-        clean = re.sub(r"[^a-z\s]", " ", clean)
-        clean = re.sub(r"\s+", " ", clean).strip()
-
-        if not clean:
-            clean = payee.lower().strip()
-
-        payee_map.setdefault(clean, []).append(dash_cat)
-
-    overrides: Dict[str, str] = {}
-    for m, cats in payee_map.items():
-        if not cats:
+        cat_name = cat_id_to_name.get(cat_id, None)
+        if not cat_name:
             continue
-        top = pd.Series(cats).value_counts().idxmax()
-        overrides[m] = top
 
-    return overrides
+        dash_cat = map_ynab_category_to_dashboard(cat_name)
+
+        clean_payee = normalize_merchant(payee)
+
+        ynab_payees.append(clean_payee)
+        payee_to_category[clean_payee] = dash_cat
+
+    # Remove duplicates
+    ynab_payees = list(set(ynab_payees))
+
+    # Returns a dict we will later merge with rule-based categories
+    return {
+        "ynab_payees": ynab_payees,
+        "payee_to_category": payee_to_category,
+        "threshold": threshold,
+    }
+
+
+def fetch_all_ynab_categories(token: str, budget_id: str) -> list[str]:
+    """
+    Returns a flat list of ALL category names inside the chosen YNAB budget.
+    Subcategories only (the actual actionable categories).
+    """
+    client = YNABClient(token=token)
+    groups = client.get_categories(budget_id)
+
+    categories = []
+
+    for g in groups:
+        for cat in g.get("categories", []):
+            name = cat.get("name")
+            # Skip internal categories like "Category Group" or "Uncategorized"
+            if name and not cat.get("hidden", False):
+                categories.append(name)
+
+    return sorted(categories)

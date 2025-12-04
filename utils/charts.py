@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.express as px
 
 
+
 def fig_balance_over_time(df: pd.DataFrame):
     if df.empty:
         return px.line(title="Balance over time")

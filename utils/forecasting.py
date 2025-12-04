@@ -1,14 +1,15 @@
 # utils/forecasting.py
 from __future__ import annotations
 
-from datetime import timedelta
-
 import pandas as pd
+import numpy as np
 
 
 def build_cashflow_timeseries(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Build a daily net & cumulative net series.
+    Builds a daily net cashflow timeseries:
+    - one row per date
+    - net = income - expenses
     """
     if df.empty:
         return pd.DataFrame(columns=["Date", "Net", "Cumulative"])
@@ -16,33 +17,47 @@ def build_cashflow_timeseries(df: pd.DataFrame) -> pd.DataFrame:
     daily = (
         df.groupby("Date")["Net"]
         .sum()
-        .sort_index()
         .reset_index()
+        .sort_values("Date")
     )
+
     daily["Cumulative"] = daily["Net"].cumsum()
+
     return daily
 
 
-def add_simple_forecast(daily: pd.DataFrame, days_ahead: int = 60) -> pd.DataFrame:
+def add_simple_forecast(daily_df: pd.DataFrame, days_ahead: int = 60) -> pd.DataFrame:
     """
-    Extend the cumulative series by assuming average daily net continues.
+    Adds a simple forward-looking forecast using the historical mean daily net flow.
+    Returns a new dataframe with future dates appended.
     """
-    if daily.empty:
-        return daily
 
-    daily = daily.copy()
-    daily["IsForecast"] = False
+    if daily_df.empty:
+        return daily_df
 
-    avg_net = daily["Net"].mean()
-    last_date = daily["Date"].max()
-    last_cum = daily["Cumulative"].iloc[-1]
+    df = daily_df.copy()
+
+    # Compute average daily net flow (simple model)
+    if "Net" not in df.columns:
+        raise ValueError("daily_df must contain a 'Net' column")
+
+    mean_net = df["Net"].mean()
+
+    # Start forecasting from last actual date & cumulative total
+    last_date = df["Date"].max()
+    last_cum = df["Cumulative"].iloc[-1]
 
     future_rows = []
-    for i in range(1, days_ahead + 1):
-        d = last_date + timedelta(days=i)
-        c = last_cum + avg_net * i
-        future_rows.append({"Date": d, "Net": avg_net, "Cumulative": c, "IsForecast": True})
+    current_cum = last_cum
 
-    future = pd.DataFrame(future_rows)
-    combined = pd.concat([daily, future], ignore_index=True)
-    return combined
+    for i in range(1, days_ahead + 1):
+        d = last_date + pd.Timedelta(days=i)
+        current_cum += mean_net
+        future_rows.append({"Date": d, "Net": mean_net, "Cumulative": current_cum})
+
+    forecast_df = pd.DataFrame(future_rows)
+    forecast_df["Type"] = "Forecast"
+
+    df["Type"] = "Actual"
+
+    return pd.concat([df, forecast_df], ignore_index=True)
