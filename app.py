@@ -1,26 +1,41 @@
 from __future__ import annotations
-import streamlit as st
-import pandas as pd
-from typing import Dict
-from pathlib import Path
+
 import json
+import requests
+from pathlib import Path
+from typing import Dict
+
+import pandas as pd
+import streamlit as st
 
 # ---- Utils Imports ----
 from utils.loader import choose_data_source, load_bank_csv
 from utils.cleaning import clean_bank_dataframe, add_time_columns, split_income_expense
 from utils.categorization import apply_rule_based_categories
 from utils.merchant_ai import (
-    load_learned_overrides, update_overrides_from_user_input,
-    train_merchant_model_from_df, apply_ml_categories, merge_external_overrides
+    load_learned_overrides,
+    update_overrides_from_user_input,
+    train_merchant_model_from_df,
+    apply_ml_categories,
 )
 from utils.subscriptions import detect_subscriptions
 from utils.anomalies import detect_amount_anomalies
-from utils.budgets import load_budgets, save_budgets, compute_budget_vs_actual
+from utils.budgets import (
+    load_budget_history,
+    save_budget_history,
+    compute_budget_vs_actual,
+    update_history_from_ynab,
+)
+from utils.budget_settings import budget_settings_editor
 from utils.forecasting import build_cashflow_timeseries, add_simple_forecast
 from utils.charts import (
-    fig_balance_over_time, fig_monthly_spend_stacked,
-    fig_daily_net_cashflow, fig_cumulative_cashflow,
-    fig_category_trends, fig_top_merchants, fig_anomalies_scatter
+    fig_balance_over_time,
+    fig_monthly_spend_stacked,
+    fig_daily_net_cashflow,
+    fig_cumulative_cashflow,
+    fig_category_trends,
+    fig_top_merchants,
+    fig_anomalies_scatter,
 )
 from utils.charts_forecast import fig_forecast_cumulative
 from utils.pdf_report import generate_monthly_report_pdf
@@ -28,14 +43,16 @@ from utils.ynab_api import (
     fetch_current_month_category_budgets,
     fetch_all_ynab_categories,
     build_payee_category_overrides,
-    list_budgets
+    list_budgets,
 )
-from utils.scenario_storage import load_scenarios, save_scenarios
 
+
+# Cached YNAB payee overrides for merchant AI
 @st.cache_data(show_spinner=False)
 def ynab_payee_overrides_cached(token: str, budget_id: str) -> Dict[str, str]:
     data = build_payee_category_overrides(token, budget_id, days_back=90)
     return data.get("payee_to_category", {})
+
 
 # ---- Streamlit App Config ----
 st.set_page_config(page_title="Personal Finance Dashboard", layout="wide")
@@ -45,13 +62,13 @@ st.set_page_config(page_title="Personal Finance Dashboard", layout="wide")
 # Data Loading
 # ===============================
 @st.cache_data
-def load_data_from_source(path):
+def load_data_from_source(path: Path) -> pd.DataFrame:
     df_raw = load_bank_csv(path)
     df = clean_bank_dataframe(df_raw)
     return add_time_columns(df)
 
 
-def sidebar_file_selection():
+def sidebar_file_selection() -> pd.DataFrame:
     st.sidebar.header("Data Source")
     uploaded = st.sidebar.file_uploader("Upload Bank CSV", type=["csv"])
     path = choose_data_source(uploaded)
@@ -82,14 +99,14 @@ def sidebar_ynab_settings():
             selected = st.sidebar.selectbox("Select Budget", list(mapping.keys()))
             budget_id = mapping[selected]
 
-            # ✔ Store in session_state so other tabs can use them
+            # store in session_state so other parts can use them
             st.session_state["ynab_token"] = token
             st.session_state["ynab_budget_id"] = budget_id
 
             st.sidebar.success("Connected to YNAB")
 
             use_payees = st.sidebar.checkbox("Use YNAB Payees for Categorisation")
-            use_budgets = st.sidebar.checkbox("Import YNAB Budgets")
+            use_budgets = st.sidebar.checkbox("Import YNAB Budgets into history")
 
         except Exception as e:
             st.sidebar.error(f"YNAB Error: {e}")
@@ -102,7 +119,7 @@ def sidebar_ynab_settings():
 # ===============================
 # Categorisation
 # ===============================
-def apply_full_categorisation(df, token, budget_id, use_payees):
+def apply_full_categorisation(df: pd.DataFrame, token, budget_id, use_payees) -> pd.DataFrame:
     overrides = load_learned_overrides()
 
     ynab_fuzzy = None
@@ -112,18 +129,16 @@ def apply_full_categorisation(df, token, budget_id, use_payees):
         except Exception as e:
             st.warning(f"YNAB Payee import failed: {e}")
 
-    # Only manual overrides go here; YNAB fuzzy is passed separately
-    merged_overrides = overrides
-
-    df = apply_rule_based_categories(df, merged_overrides, ynab_fuzzy)
-    train_merchant_model_from_df(df, merged_overrides)
-    return apply_ml_categories(df, merged_overrides)
+    # We pass both manual overrides and fuzzy structure into the categoriser
+    df = apply_rule_based_categories(df, overrides, ynab_fuzzy)
+    train_merchant_model_from_df(df, overrides)
+    return apply_ml_categories(df, overrides)
 
 
 # ===============================
 # Sidebar Filters
 # ===============================
-def sidebar_filters(df):
+def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
     st.sidebar.header("Filters")
 
     if "Date" in df.columns:
@@ -132,7 +147,7 @@ def sidebar_filters(df):
         df = df[(df["Date"] >= pd.to_datetime(start)) & (df["Date"] <= pd.to_datetime(end))]
 
     if "Category" in df.columns:
-        cats = sorted(df["Category"].unique())
+        cats = sorted(df["Category"].dropna().unique())
         chosen = st.sidebar.multiselect("Categories", cats, default=cats)
         df = df[df["Category"].isin(chosen)]
 
@@ -143,12 +158,12 @@ def sidebar_filters(df):
 # ===============================
 # Merchant Categorisation Editing
 # ===============================
-def merchant_editor(df):
+def merchant_editor(df: pd.DataFrame):
     st.subheader("Merchant Categorisation (Auto-Learning)")
 
     overrides = load_learned_overrides()
 
-    # ---------- Merchant list (top 30 by spend) ----------
+    # Merchant list (top 30 by spend)
     merchants = (
         df.groupby("MerchantClean")["Paid out"]
         .sum()
@@ -160,10 +175,10 @@ def merchant_editor(df):
         st.write("No expense data available to categorise.")
         return
 
-    # ---------- Dashboard categories from data ----------
+    # Dashboard categories from data
     dashboard_categories = sorted(df["Category"].dropna().unique().tolist())
 
-    # ---------- YNAB: token + budget from session ----------
+    # YNAB: token + budget from session
     ynab_token = st.session_state.get("ynab_token")
     ynab_budget_id = st.session_state.get("ynab_budget_id")
 
@@ -173,7 +188,6 @@ def merchant_editor(df):
     if ynab_token and ynab_budget_id:
         # 1) Load all YNAB categories for dropdowns
         try:
-            from utils.ynab_api import fetch_all_ynab_categories
             ynab_categories = fetch_all_ynab_categories(ynab_token, ynab_budget_id)
         except Exception as e:
             st.warning(f"Could not load YNAB categories: {e}")
@@ -184,7 +198,7 @@ def merchant_editor(df):
         except Exception as e:
             st.warning(f"Could not load YNAB payee mappings: {e}")
 
-    # ---------- Load globally saved custom categories ----------
+    # Load globally saved custom categories (for merchant AI only)
     custom_categories_path = Path("models/custom_categories.json")
     if custom_categories_path.exists():
         try:
@@ -195,7 +209,7 @@ def merchant_editor(df):
     else:
         custom_cats = []
 
-    # ---------- Merge all category pools ----------
+    # Merge all category pools
     all_categories = sorted(set(dashboard_categories + ynab_categories + custom_cats + ["Other"]))
 
     st.write(
@@ -209,12 +223,12 @@ def merchant_editor(df):
     )
 
     updates = {}
-    new_custom_categories = set(custom_cats)  # track additions
+    new_custom_categories = set(custom_cats)
 
     for merchant, spent in merchants.items():
         merchant_clean = str(merchant)
 
-        # 1) Saved override (highest priority)
+        # 1) Saved override
         current_cat = overrides.get(merchant_clean)
 
         # 2) YNAB fuzzy suggestion
@@ -247,21 +261,21 @@ def merchant_editor(df):
             key=f"mc_drop_{merchant_clean}",
         )
 
-        # ---------- Optional custom category ----------
+        # Optional custom category
         custom_cat = st.text_input(
             f"Custom category for {merchant_clean} (optional)",
             value="",
             key=f"mc_custom_{merchant_clean}",
-            placeholder="Leave blank to use dropdown value"
+            placeholder="Leave blank to use dropdown value",
         ).strip()
 
         if custom_cat:
             updates[merchant_clean] = custom_cat
-            new_custom_categories.add(custom_cat)  # track new additions
+            new_custom_categories.add(custom_cat)
         else:
             updates[merchant_clean] = selected_cat
 
-    # ---------- Save button ----------
+    # Save button
     if st.button("Save merchant categories & retrain model"):
         updated_overrides = update_overrides_from_user_input(overrides, updates)
 
@@ -270,7 +284,7 @@ def merchant_editor(df):
         with open(custom_categories_path, "w", encoding="utf-8") as f:
             json.dump(sorted(new_custom_categories), f, indent=2, ensure_ascii=False)
 
-        # Retrain machine learning model with updated labels
+        # Retrain model
         train_merchant_model_from_df(df, updated_overrides)
 
         st.success("Merchant categories saved, custom categories updated, and model retrained.")
@@ -297,6 +311,7 @@ def main():
         "Anomalies",
         "Budgets",
         "Merchant AI",
+        "YNAB API Data",  # <--- NEW TAB
         "Export"
     ])
 
@@ -336,20 +351,8 @@ def main():
 
         st.markdown(
             "Adjust the forecast horizon and optionally exclude categories or specific "
-            "transactions that you know won’t recur (e.g., one-off expenses or cancelled "
-            "subscriptions). You can also save scenarios and later compare forecasts "
-            "against what actually happened."
+            "transactions that you know won’t recur (e.g., one-off expenses or cancelled subscriptions)."
         )
-
-        # -------------------------------
-        # Load saved scenarios
-        # -------------------------------
-        scenarios = load_scenarios()
-
-        # ================================
-        # 1. Forecast Settings
-        # ================================
-        st.subheader("Forecast Settings")
 
         days_ahead = st.slider(
             "Forecast horizon (days)",
@@ -357,9 +360,10 @@ def main():
             max_value=365,
             value=90,
             step=15,
-            help="How many days into the future should the model project?"
+            help="How many days into the future should the model project?",
         )
 
+        # Exclude categories from forecast
         all_cats = sorted(df["Category"].dropna().unique())
         exclude_cats = st.multiselect(
             "Exclude categories from forecast",
@@ -371,29 +375,24 @@ def main():
             ),
         )
 
-        # Base dataset for forecasting (after category exclusion)
+        # Base dataset for forecasting (category-filtered)
         df_forecast_input = df.copy()
         if exclude_cats:
             df_forecast_input = df_forecast_input[~df_forecast_input["Category"].isin(exclude_cats)]
 
-        # ================================
-        # 2. Exclude Specific Transactions
-        # ================================
-        st.subheader("Exclude Specific Large Expenses (Optional)")
+        # Exclude specific large transactions
+        st.markdown("### Exclude specific large expenses (optional)")
 
-        # Track excluded transaction indices across reruns
         if "excluded_tx_ids" not in st.session_state:
             st.session_state["excluded_tx_ids"] = set()
 
         candidates = df_forecast_input.copy()
         if "Paid out" in candidates.columns:
-            candidates = candidates[candidates["Paid out"] > 0]
-            candidates = candidates.sort_values("Paid out", ascending=False).head(50)
+            candidates = candidates[candidates["Paid out"] > 0].sort_values("Paid out", ascending=False).head(50)
         else:
             candidates = pd.DataFrame(columns=df_forecast_input.columns)
 
         if not candidates.empty:
-            # Build label -> index mapping
             options = {}
             for idx, row in candidates.iterrows():
                 date_str = (
@@ -406,28 +405,21 @@ def main():
                 label = f"{date_str} | £{amount:,.2f} | {desc}"
                 options[label] = idx
 
-            # Convert current excluded IDs to labels (only those still visible)
             current_ids = st.session_state["excluded_tx_ids"]
-            default_labels = [
-                lbl for lbl, ix in options.items() if ix in current_ids
-            ]
+            default_labels = [lbl for lbl, ix in options.items() if ix in current_ids]
 
             selected_labels = st.multiselect(
                 "Transactions to exclude from forecast",
                 list(options.keys()),
                 default=default_labels,
                 help=(
-                    "These individual transactions will be removed from the data used to estimate "
-                    "the forecast trend, but will remain in all historical charts."
+                    "These transactions will be removed from the trend estimation, "
+                    "but will remain in the historical charts."
                 ),
             )
 
-            # Update session_state with chosen indices
-            st.session_state["excluded_tx_ids"] = {
-                options[lbl] for lbl in selected_labels
-            }
+            st.session_state["excluded_tx_ids"] = {options[lbl] for lbl in selected_labels}
 
-            # Apply transaction-level exclusions
             if st.session_state["excluded_tx_ids"]:
                 df_forecast_input = df_forecast_input[
                     ~df_forecast_input.index.isin(st.session_state["excluded_tx_ids"])
@@ -435,69 +427,14 @@ def main():
         else:
             st.info("No large outgoing transactions found to exclude.")
 
-        # ================================
-        # 3. Scenario Management
-        # ================================
-        st.subheader("Scenario Management")
+        daily_for_forecast = build_cashflow_timeseries(df_forecast_input)
 
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            new_scenario_name = st.text_input(
-                "Scenario name (to save current settings)",
-                value="",
-                placeholder="e.g. Post-car-insurance, No one-off roof repair"
-            )
-        with col2:
-            if st.button("💾 Save scenario"):
-                name = new_scenario_name.strip()
-                if not name:
-                    st.warning("Please enter a scenario name before saving.")
-                else:
-                    scenarios[name] = {
-                        # created_at will be normalised to today's date in save_scenarios
-                        "days_ahead": int(days_ahead),
-                        "exclude_cats": list(exclude_cats),
-                        "exclude_tx_ids": list(st.session_state.get("excluded_tx_ids", set())),
-                    }
-                    save_scenarios(scenarios)
-                    st.success(f"Scenario '{name}' saved.")
-
-        scenario_created = None
-        scenario_choice = None
-        if scenarios:
-            scenario_choice = st.selectbox(
-                "Compare against an existing scenario (for vertical marker & performance overlay)",
-                ["(None)"] + list(scenarios.keys())
-            )
-            if scenario_choice != "(None)":
-                scenario_created = scenarios[scenario_choice].get("created_at")
-                st.caption(f"Selected scenario created at: {scenario_created}")
-        else:
-            st.info("No saved scenarios yet. Save one above to enable forecast vs reality comparison.")
-
-        # ================================
-        # 4. Build Forecast + Chart
-        # ================================
-        daily = build_cashflow_timeseries(df_forecast_input)
-
-        if daily.empty:
+        if daily_for_forecast.empty:
             st.warning("No data available for forecasting after applying filters/exclusions.")
         else:
-            # Combined Actual + Forecast
-            forecast_df = add_simple_forecast(daily, days_ahead=days_ahead)
-
-            # Actual cashflow based on full dataset (for overlay)
-            actual_daily = build_cashflow_timeseries(df)
-
+            forecast_df = add_simple_forecast(daily_for_forecast, days_ahead=days_ahead)
             st.subheader("Cumulative Cashflow Forecast")
-            st.plotly_chart(
-                fig_forecast_cumulative(
-                    forecast_df,
-                    actual_df=actual_daily,
-                    scenario_date=scenario_created,
-                ),
-                use_container_width=True,
-            )
+            st.plotly_chart(fig_forecast_cumulative(forecast_df), use_container_width=True)
 
             with st.expander("Show forecast data"):
                 st.dataframe(forecast_df)
@@ -535,19 +472,43 @@ def main():
     with tabs[6]:
         st.header("Budgets vs Actual")
 
+        # Load existing budget history
+        budget_history = load_budget_history()
+
+        # Optional: import current-month budgets from YNAB
         if token and budget_id and use_budget_import:
             try:
-                bud_df = fetch_current_month_category_budgets(token, budget_id)
-                st.dataframe(bud_df)
+                st.subheader("YNAB current month budgets (raw)")
+                ynab_bud_df = fetch_current_month_category_budgets(token, budget_id)
+                st.dataframe(ynab_bud_df)
 
-                save_budgets({
-                    row["dashboard_category"]: row["budgeted"]
-                    for _, row in bud_df.iterrows()
-                })
+                # Use the month string from the DataFrame
+                year_month = ynab_bud_df["month"].iloc[0]
+                budget_history = update_history_from_ynab(budget_history, ynab_bud_df, year_month)
+                save_budget_history(budget_history)
+
+                st.success(f"Imported YNAB budgets into history for {year_month}.")
             except Exception as e:
                 st.warning(f"YNAB Budget Import Failed: {e}")
 
-        st.dataframe(compute_budget_vs_actual(expense, load_budgets()))
+        # Budget settings editor (for modes & amounts)
+        with st.expander("Configure category budget modes & amounts"):
+            budget_history = budget_settings_editor(df, budget_history)
+            if st.button("💾 Save budget settings"):
+                save_budget_history(budget_history)
+                st.success("Budget settings saved.")
+
+        # Now compute Budget vs Actual over the current filtered period
+        bv = compute_budget_vs_actual(expense, budget_history)
+        if bv.empty:
+            st.write("No budget/spend data available for this period.")
+        else:
+            st.subheader("Budget vs Actual (current filter)")
+            st.dataframe(bv)
+
+            st.subheader("Budget vs Actual chart")
+            chart_df = bv.set_index("Category")[["Budget", "Actual"]]
+            st.bar_chart(chart_df)
 
     # =======================
     # Tab 8: Merchant AI
@@ -556,9 +517,72 @@ def main():
         merchant_editor(df)
 
     # =======================
-    # Tab 9: Export
+    # Tab 9: YNAB API Data
     # =======================
     with tabs[8]:
+        st.header("YNAB API – Raw Data Viewer")
+
+        if not token or not budget_id:
+            st.info("Connect a YNAB token + select a budget in the sidebar to view raw API data.")
+        else:
+            st.success("YNAB connected — showing raw API responses")
+
+            from utils.ynab_api import YNABClient
+            client = YNABClient(token=token)
+
+            # -------------------- CATEGORY GROUPS --------------------
+            st.subheader("Category Groups & Categories")
+            try:
+                groups = client.get_categories(budget_id)
+                with st.expander("Show category groups JSON"):
+                    st.json(groups)
+            except Exception as e:
+                st.error(f"Error fetching categories: {e}")
+
+            # -------------------- CURRENT MONTH CATEGORIES --------------------
+            st.subheader("Current Month Categories (budget/activity/balance)")
+            try:
+                curr_month = client.get_current_month_categories(budget_id)
+                with st.expander("Show current month categories JSON"):
+                    st.json(curr_month)
+            except Exception as e:
+                st.error(f"Error fetching current month categories: {e}")
+
+            # -------------------- PAST MONTHS --------------------
+            st.subheader("Past Months Metadata")
+            try:
+                url = f"https://api.youneedabudget.com/v1/budgets/{budget_id}/months"
+                resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
+                resp.raise_for_status()
+                months = resp.json().get("data", {}).get("months", [])
+                with st.expander("Show months JSON"):
+                    st.json(months)
+            except Exception as e:
+                st.error(f"Error fetching months: {e}")
+
+            # -------------------- PAYEES --------------------
+            st.subheader("Payees")
+            try:
+                payees = client.get_payees(budget_id)
+                with st.expander("Show payees JSON"):
+                    st.json(payees)
+            except Exception as e:
+                st.error(f"Error fetching payees: {e}")
+
+            # -------------------- RECENT TRANSACTIONS --------------------
+            st.subheader("Recent Transactions (last 90 days)")
+            try:
+                since_str = (pd.Timestamp.today() - pd.Timedelta(days=90)).date().isoformat()
+                txs = client.get_transactions_since(budget_id, since_str)
+                with st.expander("Show transactions JSON"):
+                    st.json(txs)
+            except Exception as e:
+                st.error(f"Error fetching transactions: {e}")
+
+    # =======================
+    # Tab 10: Export
+    # =======================
+    with tabs[9]:
         st.header("Export Data")
 
         st.download_button("Download Filtered CSV", df.to_csv(index=False), "filtered.csv")
