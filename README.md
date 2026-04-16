@@ -1,4 +1,4 @@
-# Personal Finance Dashboard (Prototype)
+# Household Budget Dashboard (Prototype)
 
 A Streamlit app for visualising and analysing personal bank statements, with optional [YNAB](https://www.youneedabudget.com/) integration.
 
