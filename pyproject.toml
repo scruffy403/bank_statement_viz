@@ -14,8 +14,14 @@ dependencies = [
     "python-dateutil",
     "chardet",
     "matplotlib",
-    "numpy"
+    "numpy",
+    "rapidfuzz"
 ]
 
 [tool.streamlit]
 theme.primaryColor="#4B9CD3"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

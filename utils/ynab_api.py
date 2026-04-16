@@ -9,7 +9,8 @@ import requests
 import pandas as pd
 
 from .category_mapping import map_ynab_category_to_dashboard
-from .cleaning import normalize_merchant
+# from .cleaning import normalize_merchant
+from payee_normalizer import normalize_payee
 
 YNAB_BASE_URL = "https://api.youneedabudget.com/v1"
 
@@ -237,7 +238,8 @@ def build_payee_category_overrides(
             continue
 
         dash_cat = map_ynab_category_to_dashboard(ynab_cat_name)
-        clean_payee = normalize_merchant(payee_name)
+
+        clean_payee = normalize_payee(payee_name)
         if not clean_payee:
             continue
 

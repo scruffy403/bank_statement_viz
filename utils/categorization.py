@@ -1,12 +1,10 @@
 # utils/categorization.py
 from __future__ import annotations
-
 from typing import Dict, Optional
-
 import pandas as pd
-
 from rapidfuzz import process, fuzz
-from .cleaning import normalize_merchant
+
+from payee_normalizer import normalize_payee
 
 
 def fuzzy_match_category(
@@ -15,16 +13,15 @@ def fuzzy_match_category(
     mapping: Dict[str, str],
     threshold: int,
 ) -> Optional[str]:
-    """
-    Returns a YNAB-derived category if fuzzy match meets threshold.
-    merchant_clean is expected to already be normalized (see normalize_merchant).
-    """
-    if not ynab_payees:
+    if not ynab_payees or not merchant_clean:
         return None
+
+    merchant_clean = merchant_clean.lower()
+    ynab_payees_norm = [p.lower() for p in ynab_payees]
 
     match, score, _ = process.extractOne(
         merchant_clean,
-        ynab_payees,
+        ynab_payees_norm,
         scorer=fuzz.partial_ratio,
     )
 
@@ -38,32 +35,25 @@ def _keyword_category(merchant: str, tx_type: str, net: float) -> str:
     m = merchant.lower()
     t = (tx_type or "").lower()
 
-    # Income first
     if net > 0 or "credit" in t:
         return "Income"
 
-    # Groceries
-    if any(k in m for k in ["sainsbury", "tesco", "asda", "aldi", "lidl", "morrisons", "co op"]):
+    if any(k in m for k in ["sainsbury", "tesco", "asda", "aldi", "lidl", "morrisons"]):
         return "Groceries"
 
-    # Eating out
-    if any(k in m for k in ["restaurant", "coffee", "cafe", "starbucks", "mcdonald", "kfc", "burger king"]):
+    if any(k in m for k in ["restaurant", "coffee", "cafe", "starbucks", "kfc", "mcdonald"]):
         return "Eating Out"
 
-    # Transport
-    if any(k in m for k in ["uber", "bolt", "tfl", "trainline", "rail", "bus", "petrol", "fuel", "shell", "esso"]):
+    if any(k in m for k in ["uber", "bolt", "bus", "rail", "train", "fuel", "petrol"]):
         return "Transport"
 
-    # Subscriptions / digital
-    if any(k in m for k in ["netflix", "spotify", "disney", "prime", "icloud", "microsoft", "adobe"]):
+    if any(k in m for k in ["netflix", "prime", "spotify", "disney", "icloud"]):
         return "Subscriptions"
 
-    # Bills & Utilities
-    if any(k in m for k in ["bt ", "vodafone", "o2", "ee ", "talktalk", "thames water", "british gas"]):
+    if any(k in m for k in ["vodafone", "o2", "ee", "bt ", "water", "gas"]):
         return "Bills & Utilities"
 
-    # Shopping generic
-    if any(k in m for k in ["amazon", "argos", "currys"]):
+    if "amazon" in m:
         return "Shopping"
 
     return "Other"
@@ -74,13 +64,6 @@ def apply_rule_based_categories(
     overrides: Dict[str, str],
     ynab_fuzzy: Optional[Dict] = None,
 ) -> pd.DataFrame:
-    """
-    Apply categories in this order:
-    1. Manual merchant overrides (from JSON / UI)
-    2. Fuzzy-matched YNAB payee categories (if ynab_fuzzy dict is provided)
-    3. Simple keyword-based rules
-    Returns a new DataFrame with 'Category' column.
-    """
     df = df.copy()
 
     if "Category" not in df.columns:
@@ -96,28 +79,30 @@ def apply_rule_based_categories(
         ynab_threshold = int(ynab_fuzzy.get("threshold", 80))
 
     for idx, row in df.iterrows():
-        merchant = (row.get("MerchantClean", "") or "").strip()
-        tx_type = row.get("Transaction type", "") or ""
-        net = float(row.get("Net", 0.0))
+        merchant_raw = (row.get("MerchantClean") or "").strip()
+        merchant_clean = normalize_payee(merchant_raw)
 
-        # 1) Manual overrides take priority
-        if merchant in overrides:
-            df.at[idx, "Category"] = overrides[merchant]
+        tx_type = row.get("Transaction type", "")
+        net = float(row.get("Net", 0))
+
+        # 1️⃣ Manual override
+        if merchant_clean in overrides:
+            df.at[idx, "Category"] = overrides[merchant_clean]
             continue
 
-        # 2) Fuzzy YNAB mapping if available
-        if ynab_payees and merchant:
-            ynab_cat = fuzzy_match_category(
-                merchant,
+        # 2️⃣ YNAB fuzzy mapping
+        if ynab_payees and merchant_clean:
+            matched = fuzzy_match_category(
+                merchant_clean,
                 ynab_payees,
                 ynab_mapping,
                 ynab_threshold,
             )
-            if ynab_cat:
-                df.at[idx, "Category"] = ynab_cat
+            if matched:
+                df.at[idx, "Category"] = matched
                 continue
 
-        # 3) Keyword-based fallback
-        df.at[idx, "Category"] = _keyword_category(merchant, tx_type, net)
+        # 3️⃣ Keyword fallback
+        df.at[idx, "Category"] = _keyword_category(merchant_clean, tx_type, net)
 
     return df
