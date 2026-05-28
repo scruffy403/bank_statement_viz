@@ -19,7 +19,7 @@ def clean_bank_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
 
     # ---- Date parsing ----
     if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
     else:
         raise ValueError("Expected a 'Date' column in input CSV.")
 
@@ -32,6 +32,7 @@ def clean_bank_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     # ---- Monetary fields ----
     df["Paid in"] = (
         df.get("Paid in", 0)
+        .fillna(0)  # ← handles NaN from empty CSV cells
         .replace("", 0)
         .astype(str)
         .str.replace("£", "")
@@ -41,6 +42,7 @@ def clean_bank_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
 
     df["Paid out"] = (
         df.get("Paid out", 0)
+        .fillna(0)  # ← handles NaN from empty CSV cells
         .replace("", 0)
         .astype(str)
         .str.replace("£", "")
