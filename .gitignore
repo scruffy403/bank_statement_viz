@@ -31,3 +31,14 @@ uploaded_bank_data.csv
 .DS_Store
 .idea/
 .vscode/
+# Models — personal data, excluded from repo
+models/budgets.json
+models/budgets_history.json
+models/forecast_scenarios.json
+models/merchant_overrides.json
+models/custom_categories.json
+# Safe demo version is fine to commit
+!models/demo_merchant_overrides.json
+
+# Demo CSV is synthetic — safe to commit
+!data/demo_transactions.csv

@@ -1,4 +1,11 @@
 # utils/merchant_ai.py
+"""
+Merchant AI — rule learning + lightweight ML categorisation.
+
+In demo mode all filesystem writes are silently skipped so the app
+works correctly on Streamlit Community Cloud (ephemeral filesystem,
+read-only repo data).
+"""
 from __future__ import annotations
 
 import json
@@ -8,29 +15,39 @@ from typing import Dict
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+
+OVERRIDES_PATH = Path("models/merchant_overrides.json")
+MODEL_CACHE: dict = {}   # in-memory model cache
 
 
-MODELS_DIR = Path("models")
-OVERRIDES_PATH = MODELS_DIR / "merchant_overrides.json"
+# ── Persistence helpers ────────────────────────────────────────────────────────
 
-# In-memory ML model
-_vectorizer: TfidfVectorizer | None = None
-_clf: LogisticRegression | None = None
+def _demo_active() -> bool:
+    """Lightweight check — avoids importing streamlit at module load time."""
+    try:
+        from utils.demo_mode import is_demo
+        return is_demo()
+    except Exception:
+        return False
 
 
 def load_learned_overrides() -> Dict[str, str]:
-    MODELS_DIR.mkdir(exist_ok=True)
-    if not OVERRIDES_PATH.exists():
-        return {}
-    try:
-        with open(OVERRIDES_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    """Load merchant → category overrides from disk."""
+    if OVERRIDES_PATH.exists():
+        try:
+            with open(OVERRIDES_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
 
 
-def _save_overrides(overrides: Dict[str, str]) -> None:
-    MODELS_DIR.mkdir(exist_ok=True)
+def _save_overrides(overrides: Dict[str, str]):
+    """Write overrides to disk — skipped silently in demo mode."""
+    if _demo_active():
+        return
+    OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(OVERRIDES_PATH, "w", encoding="utf-8") as f:
         json.dump(overrides, f, indent=2, ensure_ascii=False)
 
@@ -39,82 +56,78 @@ def update_overrides_from_user_input(
     existing: Dict[str, str],
     updates: Dict[str, str],
 ) -> Dict[str, str]:
-    merged = dict(existing)
-    merged.update(updates)
+    """Merge user edits into the existing overrides dict and persist."""
+    merged = {**existing, **updates}
     _save_overrides(merged)
     return merged
 
 
-def train_merchant_model_from_df(df: pd.DataFrame, overrides: Dict[str, str]) -> None:
-    """
-    Train a simple text classifier (MerchantClean -> Category).
-    Uses overrides when present as labels.
-    """
-    global _vectorizer, _clf
+# ── Model training ─────────────────────────────────────────────────────────────
 
-    if df.empty:
+def train_merchant_model_from_df(
+    df: pd.DataFrame,
+    overrides: Dict[str, str],
+) -> None:
+    """
+    Train (or retrain) a TF-IDF + Logistic Regression classifier from the
+    current DataFrame + known overrides.  The fitted pipeline is stored in
+    the module-level MODEL_CACHE so it survives re-runs in the same session.
+    """
+    global MODEL_CACHE
+
+    # Build training corpus: overrides take precedence over inferred categories
+    rows = []
+    if "MerchantClean" in df.columns and "Category" in df.columns:
+        for _, row in df.iterrows():
+            merchant = str(row.get("MerchantClean") or "").strip()
+            category = str(row.get("Category") or "").strip()
+            if merchant and category and category != "Other":
+                rows.append((merchant, category))
+
+    # Inject manual overrides (may expand training set)
+    for merchant, category in overrides.items():
+        rows.append((merchant, category))
+
+    if len(rows) < 5:
+        # Not enough data to train
         return
 
-    df = df.copy()
-    if "Category" not in df.columns:
-        return
+    texts, labels = zip(*rows)
 
-    # Build labels with overrides priority
-    labels = []
-    texts = []
-    for _, row in df.iterrows():
-        merchant = (row.get("MerchantClean") or "").strip()
-        if not merchant:
-            continue
-        cat = overrides.get(merchant) or row.get("Category")
-        if not cat:
-            continue
-        texts.append(merchant)
-        labels.append(cat)
+    pipeline = Pipeline([
+        ("tfidf", TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4), max_features=8000)),
+        ("clf",   LogisticRegression(max_iter=500, C=1.0, solver="lbfgs")),
+    ])
 
-    if len(set(labels)) < 2:
-        # Not enough diversity to train a model
-        return
-
-    vec = TfidfVectorizer(min_df=1, ngram_range=(1, 2))
-    X = vec.fit_transform(texts)
-    clf = LogisticRegression(max_iter=1000)
-    clf.fit(X, labels)
-
-    _vectorizer = vec
-    _clf = clf
+    try:
+        pipeline.fit(list(texts), list(labels))
+        MODEL_CACHE["pipeline"] = pipeline
+    except Exception:
+        pass  # graceful — ML is enhancement, not critical path
 
 
-def apply_ml_categories(df: pd.DataFrame, overrides: Dict[str, str]) -> pd.DataFrame:
+def apply_ml_categories(
+    df: pd.DataFrame,
+    overrides: Dict[str, str],
+) -> pd.DataFrame:
     """
-    Use the trained model to fill in categories for merchants
-    that are currently 'Other' or missing.
+    Apply the trained ML model to rows still labelled 'Other'.
+    Falls back to the existing label if no model is available.
     """
-    df = df.copy()
-    global _vectorizer, _clf
-
-    if _vectorizer is None or _clf is None:
+    pipeline = MODEL_CACHE.get("pipeline")
+    if pipeline is None or "MerchantClean" not in df.columns:
         return df
 
-    if "Category" not in df.columns:
-        df["Category"] = "Other"
-
-    mask = df["Category"].isna() | (df["Category"] == "Other")
-    to_predict = df.loc[mask, "MerchantClean"].fillna("").astype(str)
-    if to_predict.empty:
+    df = df.copy()
+    mask = df["Category"] == "Other"
+    if not mask.any():
         return df
 
-    X = _vectorizer.transform(to_predict)
-    preds = _clf.predict(X)
+    merchants = df.loc[mask, "MerchantClean"].fillna("").astype(str).tolist()
+    try:
+        predictions = pipeline.predict(merchants)
+        df.loc[mask, "Category"] = predictions
+    except Exception:
+        pass
 
-    df.loc[mask, "Category"] = preds
     return df
-
-
-def merge_external_overrides(
-    base_overrides: Dict[str, str],
-    external: Dict[str, str],
-) -> Dict[str, str]:
-    merged = base_overrides.copy()
-    merged.update(external)
-    return merged
