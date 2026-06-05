@@ -323,8 +323,6 @@ def normalize_payee(raw_name: str) -> str:
         else:
             s = s0[2:].strip(" -")
 
-    print("DEBUG AFTER SQ STRIP:", repr(s))
-
     # -----------------------------
     # 3.1 Hard-coded special cases
     # -----------------------------
