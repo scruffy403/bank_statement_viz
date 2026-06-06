@@ -61,6 +61,8 @@ YNAB_TOKEN = "your-token-here"
 
 ## Demo Mode
 
+A live demo is hosted on Streamlit Community Cloud: **[bankstatementvisualization.streamlit.app](https://bankstatementvisualization.streamlit.app/)**
+
 Demo mode runs the full dashboard against a synthetic dataset — no real bank data required. It is designed for public deployments (e.g. Streamlit Cloud) where you want to show what the tool can do without exposing personal finances.
 
 ### What changes in demo mode
